@@ -41,7 +41,7 @@ struct AccountInfo {
     is_writable: bool,
 }
 
-/// 1. Generate Keypair
+// 1. Generate Keypair
 async fn handle_keypair() -> impl IntoResponse {
     let mut rng = OsRng;
     let kp = Keypair::generate(&mut rng);
@@ -52,7 +52,7 @@ async fn handle_keypair() -> impl IntoResponse {
     (StatusCode::OK, Json(ApiResponse::ok(data)))
 }
 
-/// 2. Create Token (initialize mint)
+// 2. Create Token
 #[derive(Deserialize)]
 struct CreateTokenReq {
     #[serde(rename = "mintAuthority")]
@@ -78,7 +78,7 @@ async fn handle_create_token(Json(req): Json<CreateTokenReq>) -> impl IntoRespon
     (StatusCode::OK, Json(ApiResponse::ok(resp)))
 }
 
-/// 3. Mint Token
+// 3. Mint Token
 #[derive(Deserialize)]
 struct MintTokenReq {
     mint: String,
@@ -108,7 +108,7 @@ async fn handle_mint_token(Json(req): Json<MintTokenReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(ApiResponse::ok(resp)))
 }
 
-/// 4. Sign Message
+// 4. Sign Message
 #[derive(Deserialize)]
 struct SignMsgReq {
     message: String,
@@ -116,6 +116,10 @@ struct SignMsgReq {
 }
 
 async fn handle_sign_msg(Json(req): Json<SignMsgReq>) -> impl IntoResponse {
+    if req.message.trim().is_empty() || req.secret.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse::err("Missing required fields")));
+    }
+
     let secret_bytes = match bs58::decode(&req.secret).into_vec() {
         Ok(b) if b.len() == 32 => b,
         _ => return (StatusCode::BAD_REQUEST, Json(ApiResponse::err("Invalid secret"))),
@@ -132,7 +136,7 @@ async fn handle_sign_msg(Json(req): Json<SignMsgReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(ApiResponse::ok(data)))
 }
 
-/// 5. Verify Message
+// 5. Verify Message
 #[derive(Deserialize)]
 struct VerifyMsgReq {
     message: String,
@@ -166,7 +170,7 @@ async fn handle_verify_msg(Json(req): Json<VerifyMsgReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(ApiResponse::ok(data)))
 }
 
-/// 6. Send SOL
+// 6. Send SOL
 #[derive(Deserialize)]
 struct SendSolReq {
     from: String,
@@ -188,7 +192,7 @@ async fn handle_send_sol(Json(req): Json<SendSolReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(ApiResponse::ok(resp)))
 }
 
-/// 7. Send Token
+// 7. Send Token
 #[derive(Deserialize)]
 struct SendTokenReq {
     destination: String,
@@ -218,7 +222,7 @@ async fn handle_send_token(Json(req): Json<SendTokenReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(ApiResponse::ok(resp)))
 }
 
-/// Helper to format sol instruction result
+// Utility: Convert instruction into JSON-compatible response
 fn instruction_to_response(ix: Instruction) -> InstructionData {
     InstructionData {
         program_id: ix.program_id.to_string(),
@@ -243,7 +247,7 @@ async fn main() {
         .route("/send/token", post(handle_send_token));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    println!("Server listening on {}", addr);
+    println!("Server listening on http://{}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
