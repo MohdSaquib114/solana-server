@@ -5,11 +5,11 @@ use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer, Verifier};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use solana_sdk::{instruction::Instruction, pubkey::Pubkey, system_instruction};
-use spl_token::instruction as token_ix;
+use spl_token::instruction as token_ops;
 use std::{net::SocketAddr, str::FromStr};
 
 #[derive(Debug, Serialize)]
-struct ApiResponse<T> {
+struct ResponseBody<T> {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<T>,
@@ -17,209 +17,225 @@ struct ApiResponse<T> {
     error: Option<String>,
 }
 
-impl<T> ApiResponse<T> {
-    fn ok(data: T) -> Self {
-        Self { success: true, data: Some(data), error: None }
+impl<T> ResponseBody<T> {
+    fn success(data: T) -> Self {
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+        }
     }
-    fn err(msg: &str) -> Self {
-        Self { success: false, data: None, error: Some(msg.to_string()) }
+
+    fn failure(message: &str) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(message.to_string()),
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new()
-        .route("/keypair", post(gen_keypair))
-        .route("/token/create", post(create_token))
-        .route("/token/mint", post(mint_token))
-        .route("/message/sign", post(sign_message))
-        .route("/message/verify", post(verify_message))
-        .route("/send/sol", post(transfer_sol))
-        .route("/send/token", post(transfer_token));
+    let api_routes = Router::new()
+        .route("/keypair", post(handle_keypair_generation))
+        .route("/mint/init", post(handle_mint_initialization))
+        .route("/mint/issue", post(handle_token_minting))
+        .route("/message/sign", post(handle_message_signing))
+        .route("/message/verify", post(handle_signature_verification))
+        .route("/transfer/sol", post(handle_sol_transfer))
+        .route("/transfer/token", post(handle_token_transfer));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    println!("Server is running on port {}",addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
+    let address = SocketAddr::from(([0, 0, 0, 0], 3000));
+    println!("Server running at http://{}", address);
+
+    axum::Server::bind(&address)
+        .serve(api_routes.into_make_service())
         .await
         .unwrap();
 }
 
-async fn gen_keypair() -> impl IntoResponse {
+async fn handle_keypair_generation() -> impl IntoResponse {
     let mut rng = OsRng;
-    let kp = Keypair::generate(&mut rng);
-    let res = serde_json::json!({
-        "pubkey": bs58::encode(kp.public.as_bytes()).into_string(),
-        "secret": bs58::encode(kp.secret.as_bytes()).into_string()
+    let keys = Keypair::generate(&mut rng);
+
+    let json = serde_json::json!({
+        "pubkey": bs58::encode(keys.public.as_bytes()).into_string(),
+        "secret": bs58::encode(keys.secret.as_bytes()).into_string()
     });
-    Json(ApiResponse::ok(res))
+
+    Json(ResponseBody::success(json))
 }
 
 #[derive(Deserialize)]
-struct CreateTokenParams {
+struct NewMintParams {
     mint_authority: String,
     mint: String,
     decimals: u8,
 }
 
-async fn create_token(Json(params): Json<CreateTokenParams>) -> impl IntoResponse {
-    let mint = match Pubkey::from_str(&params.mint) {
+async fn handle_mint_initialization(Json(payload): Json<NewMintParams>) -> impl IntoResponse {
+    let mint = match Pubkey::from_str(&payload.mint) {
         Ok(m) => m,
-        Err(_) => return Json(ApiResponse::err("invalid mint")),
+        Err(_) => return Json(ResponseBody::failure("Invalid mint address")),
     };
-    let authority = match Pubkey::from_str(&params.mint_authority) {
+    let authority = match Pubkey::from_str(&payload.mint_authority) {
         Ok(a) => a,
-        Err(_) => return Json(ApiResponse::err("invalid authority")),
+        Err(_) => return Json(ResponseBody::failure("Invalid mint authority")),
     };
-    let ix = match token_ix::initialize_mint(&spl_token::id(), &mint, &authority, None, params.decimals) {
+    let instruction_data = match token_ops::initialize_mint(&spl_token::id(), &mint, &authority, None, payload.decimals) {
         Ok(ix) => ix,
-        Err(_) => return Json(ApiResponse::err("failed to build mint instruction")),
+        Err(_) => return Json(ResponseBody::failure("Failed to initialize mint")),
     };
-    Json(ApiResponse::ok(serialize_instruction(&ix)))
+    Json(ResponseBody::success(serialize_instruction(&instruction_data)))
 }
 
 #[derive(Deserialize)]
-struct MintParams {
+struct TokenMintRequest {
     mint: String,
-    destination: String,
+    recipient: String,
     authority: String,
     amount: u64,
 }
 
-async fn mint_token(Json(params): Json<MintParams>) -> impl IntoResponse {
-    let mint = match Pubkey::from_str(&params.mint) {
+async fn handle_token_minting(Json(payload): Json<TokenMintRequest>) -> impl IntoResponse {
+    let mint = match Pubkey::from_str(&payload.mint) {
         Ok(m) => m,
-        Err(_) => return Json(ApiResponse::err("invalid mint")),
+        Err(_) => return Json(ResponseBody::failure("Invalid mint")),
     };
-    let dest = match Pubkey::from_str(&params.destination) {
+    let destination = match Pubkey::from_str(&payload.recipient) {
         Ok(d) => d,
-        Err(_) => return Json(ApiResponse::err("invalid destination")),
+        Err(_) => return Json(ResponseBody::failure("Invalid recipient")),
     };
-    let authority = match Pubkey::from_str(&params.authority) {
+    let issuer = match Pubkey::from_str(&payload.authority) {
         Ok(a) => a,
-        Err(_) => return Json(ApiResponse::err("invalid authority")),
+        Err(_) => return Json(ResponseBody::failure("Invalid authority")),
     };
-    let ix = match token_ix::mint_to(&spl_token::id(), &mint, &dest, &authority, &[], params.amount) {
+    let instruction_data = match token_ops::mint_to(&spl_token::id(), &mint, &destination, &issuer, &[], payload.amount) {
         Ok(ix) => ix,
-        Err(_) => return Json(ApiResponse::err("failed to build mint instruction")),
+        Err(_) => return Json(ResponseBody::failure("Minting failed")),
     };
-    Json(ApiResponse::ok(serialize_instruction(&ix)))
+    Json(ResponseBody::success(serialize_instruction(&instruction_data)))
 }
 
 #[derive(Deserialize)]
-struct SignParams {
+struct MessageSigningPayload {
     message: String,
     secret: String,
 }
 
-async fn sign_message(Json(params): Json<SignParams>) -> impl IntoResponse {
-    let secret_bytes = match bs58::decode(&params.secret).into_vec() {
+async fn handle_message_signing(Json(payload): Json<MessageSigningPayload>) -> impl IntoResponse {
+    let secret_bytes = match bs58::decode(&payload.secret).into_vec() {
         Ok(b) if b.len() == 32 => b,
-        _ => return Json(ApiResponse::err("invalid secret")),
+        _ => return Json(ResponseBody::failure("Invalid secret key")),
     };
     let secret = SecretKey::from_bytes(&secret_bytes).unwrap();
     let public = PublicKey::from(&secret);
-    let kp = Keypair { secret, public };
-    let sig = kp.sign(params.message.as_bytes());
-    let res = serde_json::json!({
-        "signature": base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+    let keys = Keypair { secret, public };
+    let signature = keys.sign(payload.message.as_bytes());
+
+    let output = serde_json::json!({
+        "signature": base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
         "public_key": bs58::encode(public.as_bytes()).into_string(),
-        "message": params.message
+        "message": payload.message
     });
-    Json(ApiResponse::ok(res))
+
+    Json(ResponseBody::success(output))
 }
 
 #[derive(Deserialize)]
-struct VerifyParams {
+struct SignatureVerificationPayload {
     message: String,
     signature: String,
     pubkey: String,
 }
 
-async fn verify_message(Json(params): Json<VerifyParams>) -> impl IntoResponse {
-    let sig_bytes = match base64::engine::general_purpose::STANDARD.decode(&params.signature) {
-        Ok(b) => b,
-        Err(_) => return Json(ApiResponse::err("invalid signature encoding")),
+async fn handle_signature_verification(Json(payload): Json<SignatureVerificationPayload>) -> impl IntoResponse {
+    let decoded_sig = match base64::engine::general_purpose::STANDARD.decode(&payload.signature) {
+        Ok(bytes) => bytes,
+        Err(_) => return Json(ResponseBody::failure("Invalid signature format")),
     };
-    let sig = match ed25519_dalek::Signature::from_bytes(&sig_bytes) {
-        Ok(s) => s,
-        Err(_) => return Json(ApiResponse::err("invalid signature format")),
+    let signature = match ed25519_dalek::Signature::from_bytes(&decoded_sig) {
+        Ok(sig) => sig,
+        Err(_) => return Json(ResponseBody::failure("Bad signature")),
     };
-    let pub_bytes = match bs58::decode(&params.pubkey).into_vec() {
-        Ok(b) => b,
-        Err(_) => return Json(ApiResponse::err("invalid public key encoding")),
+    let decoded_key = match bs58::decode(&payload.pubkey).into_vec() {
+        Ok(bytes) => bytes,
+        Err(_) => return Json(ResponseBody::failure("Invalid public key")),
     };
-    let pubkey = match PublicKey::from_bytes(&pub_bytes) {
+    let pubkey = match PublicKey::from_bytes(&decoded_key) {
         Ok(pk) => pk,
-        Err(_) => return Json(ApiResponse::err("bad public key format")),
+        Err(_) => return Json(ResponseBody::failure("Bad public key format")),
     };
-    let valid = pubkey.verify(params.message.as_bytes(), &sig).is_ok();
-    Json(ApiResponse::ok(serde_json::json!({
-        "valid": valid,
-        "message": params.message,
-        "pubkey": params.pubkey
+    let is_valid = pubkey.verify(payload.message.as_bytes(), &signature).is_ok();
+
+    Json(ResponseBody::success(serde_json::json!({
+        "valid": is_valid,
+        "message": payload.message,
+        "pubkey": payload.pubkey
     })))
 }
 
 #[derive(Deserialize)]
-struct SolTransferParams {
+struct SolTransferPayload {
     from: String,
     to: String,
     lamports: u64,
 }
 
-async fn transfer_sol(Json(params): Json<SolTransferParams>) -> impl IntoResponse {
-    let from = match Pubkey::from_str(&params.from) {
+async fn handle_sol_transfer(Json(payload): Json<SolTransferPayload>) -> impl IntoResponse {
+    let sender = match Pubkey::from_str(&payload.from) {
         Ok(f) => f,
-        Err(_) => return Json(ApiResponse::err("invalid from")),
+        Err(_) => return Json(ResponseBody::failure("Invalid sender address")),
     };
-    let to = match Pubkey::from_str(&params.to) {
+    let receiver = match Pubkey::from_str(&payload.to) {
         Ok(t) => t,
-        Err(_) => return Json(ApiResponse::err("invalid to")),
+        Err(_) => return Json(ResponseBody::failure("Invalid receiver address")),
     };
-    let ix = system_instruction::transfer(&from, &to, params.lamports);
-    Json(ApiResponse::ok(serialize_instruction(&ix)))
+    let sol_transfer = system_instruction::transfer(&sender, &receiver, payload.lamports);
+    Json(ResponseBody::success(serialize_instruction(&sol_transfer)))
 }
 
 #[derive(Deserialize)]
-struct TokenTransferParams {
+struct TokenTransferPayload {
     destination: String,
     mint: String,
     owner: String,
     amount: u64,
 }
 
-async fn transfer_token(Json(params): Json<TokenTransferParams>) -> impl IntoResponse {
-    let dest = match Pubkey::from_str(&params.destination) {
+async fn handle_token_transfer(Json(payload): Json<TokenTransferPayload>) -> impl IntoResponse {
+    let dest = match Pubkey::from_str(&payload.destination) {
         Ok(d) => d,
-        Err(_) => return Json(ApiResponse::err("invalid destination")),
+        Err(_) => return Json(ResponseBody::failure("Invalid destination")),
     };
-    let mint = match Pubkey::from_str(&params.mint) {
+    let mint = match Pubkey::from_str(&payload.mint) {
         Ok(m) => m,
-        Err(_) => return Json(ApiResponse::err("invalid mint")),
+        Err(_) => return Json(ResponseBody::failure("Invalid mint")),
     };
-    let owner = match Pubkey::from_str(&params.owner) {
+    let owner = match Pubkey::from_str(&payload.owner) {
         Ok(o) => o,
-        Err(_) => return Json(ApiResponse::err("invalid owner")),
+        Err(_) => return Json(ResponseBody::failure("Invalid owner")),
     };
-    let ix = match token_ix::transfer(&spl_token::id(), &dest, &mint, &owner, &[], params.amount) {
+    let token_transfer = match token_ops::transfer(&spl_token::id(), &dest, &mint, &owner, &[], payload.amount) {
         Ok(ix) => ix,
-        Err(_) => return Json(ApiResponse::err("failed token transfer instruction")),
+        Err(_) => return Json(ResponseBody::failure("Token transfer instruction failed")),
     };
-    Json(ApiResponse::ok(serialize_instruction(&ix)))
+    Json(ResponseBody::success(serialize_instruction(&token_transfer)))
 }
 
 fn serialize_instruction(ix: &Instruction) -> serde_json::Value {
-    let accounts = ix.accounts.iter().map(|a| {
+    let meta_info = ix.accounts.iter().map(|acc| {
         serde_json::json!({
-            "pubkey": a.pubkey.to_string(),
-            "is_signer": a.is_signer,
-            "is_writable": a.is_writable,
+            "pubkey": acc.pubkey.to_string(),
+            "is_signer": acc.is_signer,
+            "is_writable": acc.is_writable,
         })
     }).collect::<Vec<_>>();
+
     serde_json::json!({
         "program_id": ix.program_id.to_string(),
-        "accounts": accounts,
+        "accounts": meta_info,
         "instruction_data": base64::engine::general_purpose::STANDARD.encode(&ix.data)
     })
 }
